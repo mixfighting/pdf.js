@@ -1,0 +1,860 @@
+openapi: "3.0.0"
+info:
+  title: HCX Cart 2.0
+  version: 0.3.0
+  description: |
+    # Cart 2.0 - API Proposal
+    ## Notes:
+
+    *Heavily work-in-progress*. Intent of this project is to collaboratively identify and spec-out the endpoints and data structures required to deliver on the new HCX experience.
+
+    Cart **visual designs** [may be found here](https://invitae.invisionapp.com/share/WERMCC2YGBT#/screens), but _please note that the designs in Invision may lag behind some of the decisions from product owners_.
+
+    ## Fundamental assumptions
+    - **One logged-in physician user, with one "current" cart.** Server will already have knowledge of the last full state of the cart with every transaction. No Cart ID or multiple carts exposed to front-end. If a saved cart is loaded, that becomes the user's current cart.
+    - **One primary patient** - most ordering business logic related to the patient assumes a single patient per order. While we have some scenarios that support additional patients (Exome, Carrier Couples), those are considered "auxiliary patients" and the order is still put together initially for a primary patient.
+
+    ## Principles of API design
+
+    - **Keep as much business logic as possible centralized in the back-end.** This enables other apps to utilize this logic, improves its testability, and reduces overall effort for changes to it. Server should be the ultimate authority on the state of the cart.
+    - **Unidirectional data flow** - API is the master of business logic. Cart transactions should return the full updated state of the cart. Front-end will be mostly dumb UI components that display the data sent to them. Critical to keep front-end light and performant for integration with multiple SPAs and the Test Catalog.
+    - **Transform, combine, and strip data on the back-end to match the structure and format of the UI.** Front-end transformers are heavy, slow down the app, require additional testing, and provide opportunities to decentralize order logic. We should avoid them when practical. Data points irrelevant to the actions of the cart (such as `aggregationType`, `tags`, `searchGroups`) should be eliminated from the payload. This supplemental data can drive business logic and filtering on the server, but need not be exposed to the user.
+
+    ### Open Questions / Decisions Needed
+    - Noted in TODOs on API property descriptions. Mostly around passing errors at this time.
+  contact:
+    name: Dave Foresman
+    email: dave.foresman@invitae.com
+tags:
+  - name: cart
+    description: 'Shopping cart contents - UI representation, drives **Cart 2.0**'
+  - name: reflex
+    description: APIs to support choosing reflex options for a product group
+  - name: rereq
+    description: APIs to support choosing re-req options for the cart.
+  - name: partnership
+    description: API / data points to support choosing eligible partnership programs
+paths:
+  /cart:
+    delete:
+      description: "Completely clear / reset the user's cart. Eliminate any rereq, reflex, or partnership selections."
+      operationId: clearCart
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: |-
+            Successfully cleared the user's cart
+            Returns an empty cart object
+        '401':
+          description: User not logged-in
+      summary: "Clear / reset current user's cart"
+      tags:
+        - cart
+    get:
+      description: |-
+        Fetch the contents and metadata for the current user's physician shopping cart
+
+        Current user can be derived from request
+      operationId: getCart
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: "Successfully fetched the user's cart"
+        '401':
+          description: User not logged-in
+      summary: "Get the current user's cart"
+      tags:
+        - cart
+  /cart/add:
+    post:
+      description: |-
+        Builds on existing "addOrRemoveConcepts" endpoint, "add" action only
+
+        Any success response _must_ include the entire updated, validated cart. This keeps business logic in the back-end.
+      operationId: addToCart
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Object at top level, in case we need to add additional params / options in the future'
+              properties:
+                concepts:
+                  items:
+                    $ref: '#/components/schemas/PRCode'
+                  type: array
+              required:
+                - concepts
+              type: object
+        description: |-
+          Concepts (tests) to add to the cart.
+
+          Posting as a property of an object to allow for additional "add" params in the future.
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: |-
+            Successfully added items to cart. Returns the full updated cart object.
+
+            If this addition qualifies the cart for reflex or partnership options, those should be updated in the response as well.
+        '401':
+          description: User not logged-in
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: |-
+            Cart operation not allowed, per validation rules.
+            Key for validation case refers to modal window content package
+            on the front-end. See CartErrors.validationCode property.
+      summary: Add items to the current cart
+      tags:
+        - cart
+  /cart/remove:
+    post:
+      description: |-
+        Builds on existing "addOrRemoveConcepts" endpoint, "remove" action only
+
+        Any success response _must_ include the entire updated, validated cart. This keeps business logic in the back-end.
+      operationId: removeFromCart
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Object at top level, in case we need to add additional params / options in the future'
+              properties:
+                concepts:
+                  items:
+                    $ref: '#/components/schemas/PRCode'
+                  type: array
+              required:
+                - concepts
+              type: object
+        description: |-
+          Concepts (tests) to remove from the cart
+
+          Posting as a property of an object to allow for additional "remove" params in the future.
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: |-
+            Successfully removed items from cart. Returns the full updated cart object.
+
+            Any partnerships, rereqs, reflex, or other meta information that no longer applies after removal should also be unset in the response.
+        '401':
+          description: User not logged-in
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: |-
+            Cart operation not allowed, per validation rules.
+            Key for validation case refers to modal window content package
+            on the front-end. See CartErrors.validationCode property.
+      summary: Remove items from the current cart
+      tags:
+        - cart
+  /partnerships/add:
+    post:
+      description: Add one or more partnership codes as active for the current Cart
+      operationId: addPartnerships
+      requestBody:
+        content:
+          application/json:
+            schema:
+              properties:
+                partnerships:
+                  items:
+                    $ref: '#/components/schemas/PartnershipCode'
+                  minItems: 1
+                  type: array
+              required:
+                - partnerships
+              type: object
+        description: Partnership code(s) to add to the current Cart
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: Successfully added Partnership code(s) to the Cart. Returns updated Cart object.
+        '404':
+          description: Not Found - unable to find indicated Partnership Code for addition to Cart
+      summary: Add Partnership Code(s) to current Cart
+      tags:
+        - partnership
+  /partnerships/remove:
+    post:
+      description: |-
+        Remove one or more partnership codes as active for the current Cart
+
+        Hitting this endpoint with an empty `partnerships` array should remove _all_ partnership codes from the cart.
+      operationId: removePartnerships
+      requestBody:
+        content:
+          application/json:
+            schema:
+              properties:
+                partnerships:
+                  items:
+                    $ref: '#/components/schemas/PartnershipCode'
+                  minItems: 0
+                  type: array
+              required:
+                - partnerships
+              type: object
+        description: Partnership code(s) to remove from the current Cart
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: Successfully removed Partnership code(s) from the Cart. Returns updated Cart object.
+        '404':
+          description: Not Found - unable to find indicated Partnership Code for removal from Cart
+      summary: Remove Partnership Code(s) from current Cart
+      tags:
+        - partnership
+  /partnerships/search:
+    get:
+      description: |-
+        Given the current user, organization, and cart contents are already known on the server, return a list of valid partnership programs for selection at the overall cart level.
+
+        Only need to pass the user's typed query string, all other knowledge can be derived server-side.
+      operationId: searchPartnerships
+      parameters:
+        - description: |-
+            User's search string, as typed in the selection dropdown
+            NOTE: assumes we have knowledge of panels in the cart server-side
+          in: query
+          name: query
+          schema:
+            default: ''
+            type: string
+            minLength: 1
+          required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartnershipResponse'
+          description: Successfully found and returned a list
+        '500':
+          description: 'Server error, try again'
+      summary: 'Search available, valid partnership programs for a cart (autocomplete)'
+      tags:
+        - partnership
+    parameters: []
+  /reflex:
+    delete:
+      description: Clear all user-provided reflex options from an OrderGroup. Unset any selected reflex tests.
+      operationId: clearReflexOptions
+      parameters:
+        - description: ProductType enum
+          in: query
+          name: productType
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: Successfully unset all Reflex options for OrderGroup.
+      summary: Clear all user-provided reflex options from an OrderGroup
+      tags:
+        - reflex
+    post:
+      description: Set user-provided reflex options for an OrderGroup
+      operationId: setReflexOptions
+      requestBody:
+        content:
+          application/json:
+            schema:
+              properties:
+                options:
+                  $ref: '#/components/schemas/OrderGroupMetaReflexUserOptions'
+                productType:
+                  $ref: '#/components/schemas/ProductType'
+              type: object
+        description: 'Reflex options object, plus productType to target which group to save options to.'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: Successfully set options for OrderGroup
+        '400':
+          description: Bad Request - validation issue with setting Reflex options (edge case - not expected to be common)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+      summary: Set Reflex options for an OrderGroup
+      tags:
+        - reflex
+  /reflex/add:
+    post:
+      description: |-
+        Add test(s) to selections for auto-reflex for a given product group.
+
+        Expectation is that only valid tests will be available for selection. While we always need to validate client input, we do not expect submission of invalid tests to be a regular occurrence.
+      operationId: addReflexTests
+      requestBody:
+        content:
+          application/json:
+            schema:
+              properties:
+                productType:
+                  $ref: '#/components/schemas/ProductType'
+                tests:
+                  items:
+                    $ref: '#/components/schemas/PRCode'
+                  type: array
+              required:
+                - productType
+                - tests
+              type: object
+        description: 'PRCodes of tests to add, plus productType to target which group to save options to.'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: Successfully added reflex test selections
+        '404':
+          description: Unable to find indicated reflex test(s) to add
+      summary: Add Reflex test(s) to an OrderGroup
+      tags:
+        - reflex
+  /reflex/remove:
+    post:
+      description: |-
+        Remove test(s) from selections for auto-reflex for a given product group.
+
+        Hitting this endpoint with an empty `tests` array should remove ALL reflex selections for the given product group.
+      operationId: removeReflexTests
+      requestBody:
+        content:
+          application/json:
+            schema:
+              properties:
+                productType:
+                  $ref: '#/components/schemas/ProductType'
+                tests:
+                  items:
+                    $ref: '#/components/schemas/PRCode'
+                  minItems: 0
+                  type: array
+              required:
+                - productType
+                - tests
+              type: object
+        description: 'PRCodes of tests to remove, plus productType to target which group to save options to.'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: Successfully removed reflex test selections
+        '404':
+          description: Unable to find indicated reflex test(s) to remove
+      summary: Remove Reflex test(s) from an OrderGroup
+      tags:
+        - reflex
+  /reflex/search:
+    get:
+      description: |-
+        Autocomplete endpoint to return a list of eligible reflex tests. Filter the items in the list based on the user's typed query string.
+        The list should be based on the tests in the identified `productType` within the user's current cart
+      operationId: searchReflexTests
+      parameters:
+        - description: 'Identifier for the productType-based Order Group we are querying on, in lieu of transmitting RRSCode. Server should be able to derive all other necessary info.'
+          in: query
+          name: productType
+          required: true
+          schema:
+            type: string
+        - description: 'User Input - search string, as typed in the selection dropdown'
+          in: query
+          name: query
+          schema:
+            default: ''
+            type: string
+            minLength: 1
+          required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestAutocompleteResponse'
+          description: Successfully found and returned a list
+        '500':
+          description: 'Server error, try again'
+      summary: Search available reflex tests for an OrderGroup (autocomplete)
+      tags:
+        - reflex
+  /rereq/add:
+    post:
+      description: |-
+        Add test(s) to selections for re-requisition at the cart level.
+
+        Expectation is that only valid tests will be available for selection. While we always need to validate client input, we do not expect submission of invalid tests to be a regular occurrence.
+      operationId: addRereqTests
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tests:
+                  minItems: 1
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/PRCode'
+              required:
+                - tests
+        description: PRCodes of tests to add
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: Successfully added rereq test(s) to selection for the Cart
+        '404':
+          description: Not found - unable to find requested PRCode(s) for addition to the cart.
+      summary: Add Rereq test(s) to the Cart
+      tags:
+        - rereq
+  /rereq/remove:
+    post:
+      description: |-
+        Remove test(s) from selections for re-requisition for the current Cart.
+
+        Hitting this endpoint with an empty `tests` array should remove all re-req selections
+      operationId: removeRereqTests
+      requestBody:
+        content:
+          application/json:
+            schema:
+              properties:
+                tests:
+                  items:
+                    $ref: '#/components/schemas/PRCode'
+                  type: array
+              required:
+                - tests
+              type: object
+        description: PRCodes of tests to remove
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+          description: OK
+        '404':
+          description: Not Found - unable to find indicated test(s) to remoove from Cart
+      summary: Remove Rereq test(s) from the Cart
+      tags:
+        - rereq
+  /rereq/search:
+    get:
+      description: "Autocomplete endpoint to return a list of eligible rereq tests for the current items in the cart. Filter the items in the list based on the user's typed query string."
+      operationId: searchRereqTests
+      parameters:
+        - description: 'User Input - search string, as typed in the selection dropdown'
+          in: query
+          name: query
+          schema:
+            example: Carri
+            type: string
+            minLength: 1
+          required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestAutocompleteResponse'
+          description: Successfully found and returned a list of eligible rereq tests
+        '500':
+          description: Internal Server Error
+      summary: Search available re-req tests for the Cart (autocomplete)
+      tags:
+        - rereq
+servers:
+  - url: 'https://www.invitae.com/api-gw/physician/v2'
+    description: Production
+  - url: 'https://invitae-web-router.ce.dev.locusdev.net/physician/v2'
+    description: CE Dev
+  - url: 'https://invitae-web-router.ce.stg.locusdev.net/physician/v2'
+    description: CE Stg
+components:
+  schemas:
+    Cart:
+      description: "Test panels included in the user's cart, grouped by Produ"
+      properties:
+        genesCount:
+          description: Total number of genes in the cart. Could be summed on front-end assuming there are no special exceptions for not counting certain genes.
+          example: 250
+          type: number
+        orderGroups:
+          items:
+            $ref: '#/components/schemas/OrderGroup'
+          type: array
+      required:
+        - orderGroups
+      type: object
+    CartErrorCode:
+      description: |-
+        Identifying code for a particular cart validation issue.
+
+        Generally, these are cases that we need to explain to the user and allow them to take action - content and actions for these cases will be maintained in the front-end app. These codes will map to modal windows on the front-end cart app (currently they are hosted in portal footer)
+
+        Maps to `conditions_search` `CartErrorCode` in lib reqrepo [see here](https://bitbucket.org/locusdevelopment/invitae-web-core/src/5572fba7b30e5a31350c7a581d6811ccaec1c574/lib/reqrepo/locus_lib_reqrepo/conditions_search.py#lines-86:97)
+
+        **TODO** - confirm if we need to add `AddRemoveConceptErrorType` and/or `AddRemoveConceptError` values here
+      enum:
+        - RRS_VALIDATION
+        - ORDER_CROSSED_PRODUCT_TYPES
+        - EXOME_COMBO_ERROR
+        - EXOME_SLICE_COMBO_ERROR
+        - CARRIER_COMBO_ERROR
+        - NIPS_COMBO_ERROR
+        - CARRIER_FMR1_ONLY_ERROR
+        - PREVENTIVE_COMBO_ERROR
+        - PREVENTIVE_COMBINED_WITH_PREVENTIVE_ERROR
+        - NIPS_IN_HOUSE_NOT_ENABLED_ERROR
+        - LOCATION_VALIDATION_ERROR
+      example: NIPS_COMBO_ERROR
+      title: ''
+      type: string
+    CartErrors:
+      description: |-
+        Test selection validation errors and any other error messages from server.
+
+        *TODO* - This structure may be altered to conform to our API best-practices around error handling. Intent is primarily to document the bits of information needed.
+      properties:
+        errorMessage:
+          description: Simpler text-only error messages for communicating basic errors
+          type: string
+        validationCode:
+          $ref: '#/components/schemas/CartErrorCode'
+      type: object
+    CartMeta:
+      description: |-
+        Data related to the contents of the cart as a whole, typically to support a feauture or workflow.
+
+        Currently contains data for cart-level rereqs and partnership programs.
+      properties:
+        partnership:
+          $ref: '#/components/schemas/CartMetaPartnership'
+        rereq:
+          $ref: '#/components/schemas/CartMetaRereq'
+      type: object
+    CartMetaPartnership:
+      description: |-
+        Data to support selection of partnership programs, at the cart level.
+
+        - `/partnerships` endpoint expected to only return partnerships that are valid for the current cart
+        - cart transactions that invalidate the cart from a chosen partnership program, should automatically remove the `selectedPartnerships` and update the `isAvailableForPartnership` flag in the response
+
+        If the above is followed, we should not need to support a form validation workflow with partnerships at the time of cart submission.
+      properties:
+        isAvailableForPartnership:
+          default: false
+          type: boolean
+        selectedPartnerships:
+          items:
+            $ref: '#/components/schemas/PartnershipOption'
+          type: array
+      required:
+        - isAvailableForPartnership
+      title: ''
+      type: object
+    CartMetaRereq:
+      description: |-
+        Data to support re-requisitioning for the overall cart
+
+        parent data will be set as the user initially creates the order and is not expected to change over the lifetime of the cart session, short of a full cart reset.
+
+        rereqTests will be selected by the user in the UI
+      properties:
+        isRerequisition:
+          default: false
+          description: |-
+            Is the current order a re-requisition?
+            NOTE: may not need this, can we just check for existence of parentReqId?
+          type: boolean
+        parent:
+          properties:
+            patientName:
+              type: string
+            reqId:
+              $ref: '#/components/schemas/RequisitionID'
+          type: object
+        rereqTests:
+          items:
+            $ref: '#/components/schemas/TestAutocompleteOption'
+          type: array
+      required:
+        - isRerequisition
+      type: object
+    CartResponse:
+      description: 'API response shape for all cart transactions. Server should always return the current, validated cart object on any add/remove/clear operations.'
+      properties:
+        cart:
+          $ref: '#/components/schemas/Cart'
+        errors:
+          $ref: '#/components/schemas/CartErrors'
+        meta:
+          $ref: '#/components/schemas/CartMeta'
+      type: object
+    Gene:
+      description: 'UI data for an individual gene, as part of a panel or add-on'
+      type: object
+      properties:
+        active:
+          default: 'true'
+          deprecated: true
+          description: FUTURE FEATURE - support customization via toggling genes on and off in the UI
+          type: boolean
+        code:
+          $ref: '#/components/schemas/PRCode'
+        name:
+          description: 'Simple, short, human-readable gene name'
+          example: BRCA2
+          type: string
+      required:
+        - code
+        - name
+    OrderGroup:
+      description: |
+        Top-level grouping in the cart. Maps to productType.
+
+        Essentially maps to the "rereqset" that a group of tests will share, which share a common product type and will create one requisition. The subtleties of rereqset grouping and logic are irrelevant to the front-end and so should be handled on the server and stripped from the payload.
+      properties:
+        meta:
+          $ref: '#/components/schemas/OrderGroupMeta'
+        productType:
+          $ref: '#/components/schemas/ProductType'
+        sampleType:
+          $ref: '#/components/schemas/SampleType'
+        testSelections:
+          items:
+            $ref: '#/components/schemas/TestSelectionPrimary'
+          type: array
+        turnaroundTime:
+          example: 5-7 Days
+          type: string
+      required:
+        - meta
+        - productType
+        - sampleType
+        - testSelections
+        - turnaroundTime
+      type: object
+    OrderGroupMeta:
+      description: |-
+        Metadata and feature-related information for an order grouping
+
+        Features and logic specific to an individual order group should be organized here, for clarity.
+      properties:
+        reflex:
+          $ref: '#/components/schemas/OrderGroupMetaReflex'
+      required:
+        - reflex
+      title: ''
+      type: object
+    OrderGroupMetaReflex:
+      description: |-
+        Reflex-related information for an order grouping.
+
+        Properties other than 'isReflexAvailable' are provided by the user, if applicable
+      title: ''
+      allOf:
+        - $ref: '#/components/schemas/OrderGroupMetaReflexUserOptions'
+        - type: object
+          properties:
+            isReflexAvailable:
+              type: boolean
+              default: 'false'
+            reflexTests:
+              $ref: '#/components/schemas/OrderGroupMetaReflexUserSelections'
+    OrderGroupMetaReflexUserOptions:
+      description: Form fields and other user-provided data related to Reflex selections for an OrderGroup
+      properties:
+        isReflexSelected:
+          default: 'false'
+          type: boolean
+        reflexConditions:
+          description: User input - Under which condition should reflex occur?
+          type: string
+      title: OrderGroupMetaReflexUserOptions
+      type: object
+    OrderGroupMetaReflexUserSelections:
+      description: Reflex tests for an OrderGroup selected by the user
+      items:
+        $ref: '#/components/schemas/TestAutocompleteOption'
+      title: OrderGroupMetaReflexUserSelections
+      type: array
+    PRCode:
+      description: 'AKA Concept Code. Primary key for a "concept", which can be a gene, add-on panel, or primary panel.'
+      example: PR01561.03
+      pattern: "^PR\\d{5}(\\.\\d{2})?$"
+      type: string
+    PartnershipCode:
+      description: |-
+        ID for a partnership program.
+
+        AKA Inviate Partner Code, Partnership Code, `studyCode`, or `groupId` in the OrderConfig Service
+      title: ''
+      type: string
+    PartnershipOption:
+      description: 'Front-end representation of a Partnership Program, intended for use in an autocomplete Select control, and as a representation for any saved selection made by the user.'
+      properties:
+        label:
+          description: Human-readable name for partnership program. Plain text.
+          type: string
+        value:
+          $ref: '#/components/schemas/PartnershipCode'
+      required:
+        - label
+      title: PartnershipOption
+      type: object
+    PartnershipResponse:
+      description: Response to a user query for available partnership programs within an autocomplete select dropdown
+      items:
+        $ref: '#/components/schemas/PartnershipOption'
+      type: array
+      uniqueItems: true
+    ProductType:
+      description: 'Product Type AKA Clinical Area. Carrier, NIPS, Diagnostic.'
+      enum:
+        - Diagnostic
+        - Proactive
+        - NIPS
+        - Carrier
+        - Exome
+      example: NIPS
+      type: string
+    RequisitionID:
+      description: Primary key for a Requisition already in our system
+      example: RQ2887575
+      pattern: "^RQ\\d{5,7}$"
+      type: string
+    SampleType:
+      description: 'Type of sample required for an OrderGroup. May represent multiple potential sample types such as "blood or saliva".'
+      example: Blood
+      type: string
+    TestAutocompleteOption:
+      description: An ultralight representation of a test panel for use in autocomplete searches and forms. Primarily for reflex and re-reqs
+      type: object
+      properties:
+        label:
+          description: 'Test panel name, plus number of genes if applicable'
+          example: Invitae Multi-Cancers Panel (84 Genes)
+          type: string
+        value:
+          $ref: '#/components/schemas/PRCode'
+        disabled:
+          type: boolean
+          default: 'false'
+          deprecated: true
+          description: |-
+            FUTURE FEATURE - 'disabled' options cannot be manually added or removed by the users, they are programmatically controlled by associated tests.
+
+            Falsy values accepted - absence of `disabled` property  will  be interpreted by front-end as `disabled: false`
+      required:
+        - label
+        - value
+    TestAutocompleteResponse:
+      type: array
+      description: Response to a user query for available tests within an autocomplete select dropdown. Initially designed for reflex and re-req
+      minItems: 0
+      items:
+        $ref: '#/components/schemas/TestAutocompleteOption'
+    TestSelection:
+      description: |
+        Basic test panel / test selection UI data.
+
+        _Generally_ maps to a Test Panel, but may also be used to represent ad-hoc collections of genes within a clinical area / rereqset.
+
+        Extended for primary panels, and re-used for add-on panels and ad-hoc gene selections.
+
+        Ad-hoc selections will not have a PRCode at this level.
+      type: object
+      properties:
+        code:
+          $ref: '#/components/schemas/PRCode'
+        genes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Gene'
+        name:
+          description: 'Human-readable label for the selection of tests. Usually panel name, or "Custom selection" when used for ad-hoc gene selections.'
+          example: 'Invitae Singleton NIPS (Down, Edwards, Pateau syndromes)'
+          type: string
+        supplemental:
+          deprecated: true
+          description: 'FUTURE FEATURE - Auxiliary content to display alongside the test selection in the UI. May be rendered in the app or contained in a tooltip, for example. Rich text for this field likely stored in Contentful or other CMS, cross-referenced by PRCode.'
+          type: string
+        disabled:
+          type: boolean
+          default: 'false'
+          deprecated: true
+          description: 'FUTURE FEATURE - For RNA project, we will need the ability to display certain tests & add-ons that the user cannot manually remove (auto-added by other test selections).'
+      required:
+        - genes
+        - name
+    TestSelectionPrimary:
+      allOf:
+        - $ref: '#/components/schemas/TestSelection'
+        - type: object
+          properties:
+            addOns:
+              minLength: 0
+              type: array
+              items:
+                $ref: '#/components/schemas/TestSelection'
+          required:
+            - addOns
+      description: |-
+        A primary panel displayed in the UI. May not be an add-on for any other panel.
+
+        For ad-hoc gene selections within a given product type, we will transmit to UI as a panel with no PRCode. This pattern may also be used for special exception cases like Carrier Couples ordering.
+  securitySchemes:
+    invitae_jwt:
+      name: JWT
+      type: apiKey
+      in: cookie
+      description: Standard HTTP-only cookie used for auth
+security:
+  - invitae_jwt: []
